@@ -52,7 +52,7 @@
 import socket
 import json
 
-# Constants - No magic numbers [cite: 3]
+# Constants - No magic numbers
 DHCP_SERVER_IP = '127.0.0.1'
 DHCP_SERVER_PORT = 6767
 DNS_SERVER_IP = '127.0.0.1'
@@ -60,20 +60,22 @@ DNS_SERVER_PORT = 5353
 BUFFER_SIZE = 1024
 TIMEOUT_SECONDS = 5.0
 TARGET_DOMAIN = "my-ftp-server.local"
+FTP_PORT = 2121          # Must match FTP_PORT_TCP in ftp_server.py
+LENGTH_HEADER_SIZE = 10  # Fix: Must match LENGTH_HEADER_SIZE in ftp_server.py
 
 def request_ip_from_dhcp():
     """Step 1: Get an IP address for the client."""
     client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     client_socket.settimeout(TIMEOUT_SECONDS)
-    
+
     try:
         message = "DISCOVER"
         print(f"\n[Client] 1. Sending '{message}' to DHCP server...")
         client_socket.sendto(message.encode('utf-8'), (DHCP_SERVER_IP, DHCP_SERVER_PORT))
-        
+
         data, _ = client_socket.recvfrom(BUFFER_SIZE)
         response = json.loads(data.decode('utf-8'))
-        
+
         if response.get("type") == "OFFER":
             assigned_ip = response.get("assigned_ip")
             print(f"[Client] -> Success! My new IP is: {assigned_ip}")
@@ -88,16 +90,16 @@ def resolve_domain_with_dns(domain_name):
     """Step 2: Ask DNS server for the IP of our target domain."""
     client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     client_socket.settimeout(TIMEOUT_SECONDS)
-    
+
     try:
         request = {"domain": domain_name}
         print(f"\n[Client] 2. Asking DNS server for IP of: {domain_name}...")
-        
+
         client_socket.sendto(json.dumps(request).encode('utf-8'), (DNS_SERVER_IP, DNS_SERVER_PORT))
-        
+
         data, _ = client_socket.recvfrom(BUFFER_SIZE)
         response = json.loads(data.decode('utf-8'))
-        
+
         if response.get("status") == "SUCCESS":
             resolved_ip = response.get("ip")
             print(f"[Client] -> Success! The IP for {domain_name} is: {resolved_ip}")
@@ -110,33 +112,39 @@ def resolve_domain_with_dns(domain_name):
         client_socket.close()
     return None
 
-
-    def connect_to_ftp_tcp(server_ip):
+# Fix: Removed the accidental 4-space indent that was before 'def' — it caused an IndentationError
+def connect_to_ftp_tcp(server_ip):
     """Step 3: Connect to the FTP server using TCP and ask for the file list."""
-    FTP_PORT = 2121
-    
-    # Create TCP socket
     client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    
+
     try:
         print(f"\n[Client] 3. Connecting to FTP Server at {server_ip}:{FTP_PORT} via TCP...")
         client_socket.connect((server_ip, FTP_PORT))
-        
+
         # Send LIST command
         command = "LIST"
         print(f"[Client] Sending command: {command}")
         client_socket.send(command.encode('utf-8'))
-        
-        # Receive the file list
-        data = client_socket.recv(BUFFER_SIZE).decode('utf-8')
+
+        # Fix: Read the 10-byte header first to find out the full message length
+        raw_header = client_socket.recv(LENGTH_HEADER_SIZE)
+        msg_length = int(raw_header.decode('utf-8'))
+
+        # Fix: Loop until we have received every byte (TCP may deliver data in multiple chunks)
+        data = b''
+        while len(data) < msg_length:
+            chunk = client_socket.recv(min(BUFFER_SIZE, msg_length - len(data)))
+            if not chunk:
+                break  # Server closed the connection unexpectedly
+            data += chunk
+
         print("\n=== Available Files on Server ===")
-        
         # Split the comma-separated string back into a list and print it nicely
-        files = data.split(",")
+        files = data.decode('utf-8').split(",")
         for i, file_name in enumerate(files):
             print(f"{i + 1}. {file_name}")
         print("=================================")
-            
+
     except Exception as e:
         print(f"[Client] Failed to connect or communicate with FTP server: {e}")
     finally:
@@ -144,18 +152,18 @@ def resolve_domain_with_dns(domain_name):
 
 if __name__ == "__main__":
     print("=== Starting Network Initialization ===")
-    
+
     # Step 1: DHCP
     my_ip = request_ip_from_dhcp()
-    
+
     if my_ip:
         # Step 2: DNS
         ftp_server_ip = resolve_domain_with_dns(TARGET_DOMAIN)
-        
+
         if ftp_server_ip:
             print("\n=== Network Initialization Complete ===")
             print(f"My IP: {my_ip}")
             print(f"Target FTP Server IP: {ftp_server_ip}")
-            
+
             # Step 3: Connect to Application Server (FTP)
             connect_to_ftp_tcp(ftp_server_ip)
