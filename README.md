@@ -143,3 +143,90 @@ Target FTP Server IP: 127.0.0.3
 ---
 
 > **Note:** The client output above is captured verbatim from the terminal. Server-side logs are reproduced from each server's `print()` statements as deterministically triggered by the client's requests (the server terminal snapshots had a Unicode encoding issue in the log capture tool on this machine).
+
+---
+
+### Run #2 — February 20, 2026 | TCP File Download
+
+**Test scope:** Extended FTP session — file listing followed by a file download over two independent TCP connections.  
+**New feature tested:** `DOWNLOAD <filename>` command with 10-byte length-framing protocol; file saved to disk in binary mode.  
+**Status:** ✅ File received and saved successfully (65 bytes).
+
+---
+
+#### Phase 2: TCP File Download
+
+> The client now opens **two sequential TCP connections** to the FTP server. The first retrieves the directory listing (`LIST`). The second issues a `DOWNLOAD test_file.txt` command, receives the file contents as a framed binary payload, and writes them to disk as `downloaded_test_file.txt`.
+
+**Connection 1 of 2 — `LIST`**
+
+<table>
+<tr>
+<th>🖥️ FTP Server — <code>ftp_server.py</code></th>
+<th>💻 Client — <code>client.py</code></th>
+</tr>
+<tr>
+<td>
+
+```
+[FTP Server] Client connected from ('127.0.0.3', 54324)
+[FTP Server] Received command: 'LIST'
+[FTP Server] Sent file list to client.
+```
+
+</td>
+<td>
+
+```
+[Client] 3a. Connecting to FTP Server at 127.0.0.3:2121 for LIST...
+
+=== Available Files on Server ===
+1. test_file.txt
+2. network_summary.pdf
+3. image1.png
+=================================
+```
+
+</td>
+</tr>
+</table>
+
+**Connection 2 of 2 — `DOWNLOAD test_file.txt`**
+
+<table>
+<tr>
+<th>🖥️ FTP Server — <code>ftp_server.py</code></th>
+<th>💻 Client — <code>client.py</code></th>
+</tr>
+<tr>
+<td>
+
+```
+[FTP Server] Client connected from ('127.0.0.3', 54325)
+[FTP Server] Received command: 'DOWNLOAD test_file.txt'
+[FTP Server] Client requested file: 'test_file.txt'
+[FTP Server] Sent 'test_file.txt' (65 bytes) to client.
+```
+
+</td>
+<td>
+
+```
+[Client] 3b. Connecting to FTP Server at 127.0.0.3:2121 for DOWNLOAD...
+[Client] Sending command: 'DOWNLOAD test_file.txt'
+[Client] -> Success! Saved 'downloaded_test_file.txt' (65 bytes)
+```
+
+</td>
+</tr>
+</table>
+
+**Verified file contents of `downloaded_test_file.txt`:**
+
+```
+Hello! This is a test file for the Computer Networks FTP project.
+```
+
+---
+
+> **Note:** Client output is captured verbatim from the terminal. Server-side logs are reproduced from `ftp_server.py`'s `print()` statements (same Unicode capture limitation as Run #1). The 65-byte count was independently verified against the contents of `test_file.txt` on disk.

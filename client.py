@@ -61,7 +61,7 @@ BUFFER_SIZE = 1024
 TIMEOUT_SECONDS = 5.0
 TARGET_DOMAIN = "my-ftp-server.local"
 FTP_PORT = 2121          # Must match FTP_PORT_TCP in ftp_server.py
-LENGTH_HEADER_SIZE = 10  # Fix: Must match LENGTH_HEADER_SIZE in ftp_server.py
+LENGTH_HEADER_SIZE = 10  # Must match LENGTH_HEADER_SIZE in ftp_server.py
 
 def request_ip_from_dhcp():
     """Step 1: Get an IP address for the client."""
@@ -112,41 +112,80 @@ def resolve_domain_with_dns(domain_name):
         client_socket.close()
     return None
 
-# Fix: Removed the accidental 4-space indent that was before 'def' — it caused an IndentationError
-def connect_to_ftp_tcp(server_ip):
-    """Step 3: Connect to the FTP server using TCP and ask for the file list."""
-    client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+def send_command(sock, command_str):
+    """Frame a command string with a 10-byte length header and send it."""
+    payload = command_str.encode('utf-8')
+    length_header = str(len(payload)).zfill(LENGTH_HEADER_SIZE).encode('utf-8')
+    sock.send(length_header + payload)
 
+def receive_all(sock):
+    """Read the 10-byte length header, then read exactly that many bytes and return them."""
+    raw_header = sock.recv(LENGTH_HEADER_SIZE)
+    msg_length = int(raw_header.decode('utf-8'))
+
+    # Loop until every byte has arrived (TCP may split data across multiple recv calls)
+    data = b''
+    while len(data) < msg_length:
+        chunk = sock.recv(min(BUFFER_SIZE, msg_length - len(data)))
+        if not chunk:
+            break  # Server closed the connection unexpectedly
+        data += chunk
+    return data
+
+def connect_to_ftp_tcp(server_ip):
+    """Step 3: Connect to the FTP server via TCP, list files, then download one."""
+
+    # --- Connection 1: LIST ---
+    # Each command uses its own TCP connection (server closes after one command)
+    client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
-        print(f"\n[Client] 3. Connecting to FTP Server at {server_ip}:{FTP_PORT} via TCP...")
+        print(f"\n[Client] 3a. Connecting to FTP Server at {server_ip}:{FTP_PORT} for LIST...")
         client_socket.connect((server_ip, FTP_PORT))
 
-        # Send LIST command
-        command = "LIST"
-        print(f"[Client] Sending command: {command}")
-        client_socket.send(command.encode('utf-8'))
+        # Send the LIST command framed with a 10-byte length header
+        send_command(client_socket, "LIST")
 
-        # Fix: Read the 10-byte header first to find out the full message length
-        raw_header = client_socket.recv(LENGTH_HEADER_SIZE)
-        msg_length = int(raw_header.decode('utf-8'))
-
-        # Fix: Loop until we have received every byte (TCP may deliver data in multiple chunks)
-        data = b''
-        while len(data) < msg_length:
-            chunk = client_socket.recv(min(BUFFER_SIZE, msg_length - len(data)))
-            if not chunk:
-                break  # Server closed the connection unexpectedly
-            data += chunk
+        # Receive the file list using the same framing
+        data = receive_all(client_socket)
 
         print("\n=== Available Files on Server ===")
-        # Split the comma-separated string back into a list and print it nicely
         files = data.decode('utf-8').split(",")
         for i, file_name in enumerate(files):
             print(f"{i + 1}. {file_name}")
         print("=================================")
 
     except Exception as e:
-        print(f"[Client] Failed to connect or communicate with FTP server: {e}")
+        print(f"[Client] Failed to get file list: {e}")
+        return  # No point continuing to DOWNLOAD if LIST already failed
+    finally:
+        client_socket.close()
+
+    # --- Connection 2: DOWNLOAD ---
+    client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        print(f"\n[Client] 3b. Connecting to FTP Server at {server_ip}:{FTP_PORT} for DOWNLOAD...")
+        client_socket.connect((server_ip, FTP_PORT))
+
+        # Frame the DOWNLOAD command with a 10-byte length header before sending
+        command = "DOWNLOAD test_file.txt"
+        print(f"[Client] Sending command: '{command}'")
+        send_command(client_socket, command)
+
+        # Receive the server's response (file bytes, or an ERROR string)
+        file_data = receive_all(client_socket)
+
+        # If the response starts with "ERROR", the file was not found on the server
+        if file_data.startswith(b"ERROR"):
+            print(f"[Client] -> Server error: {file_data.decode('utf-8')}")
+        else:
+            # Save the raw bytes to disk in binary write mode
+            output_filename = "downloaded_test_file.txt"
+            with open(output_filename, 'wb') as f:
+                f.write(file_data)
+            print(f"[Client] -> Success! Saved '{output_filename}' ({len(file_data)} bytes)")
+
+    except Exception as e:
+        print(f"[Client] Failed to download file: {e}")
     finally:
         client_socket.close()
 
@@ -165,5 +204,5 @@ if __name__ == "__main__":
             print(f"My IP: {my_ip}")
             print(f"Target FTP Server IP: {ftp_server_ip}")
 
-            # Step 3: Connect to Application Server (FTP)
+            # Step 3: Connect to FTP server (list files + download)
             connect_to_ftp_tcp(ftp_server_ip)
