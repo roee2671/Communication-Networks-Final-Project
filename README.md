@@ -230,3 +230,11 @@ Hello! This is a test file for the Computer Networks FTP project.
 ---
 
 > **Note:** Client output is captured verbatim from the terminal. Server-side logs are reproduced from `ftp_server.py`'s `print()` statements (same Unicode capture limitation as Run #1). The 65-byte count was independently verified against the contents of `test_file.txt` on disk.
+
+
+### Wireshark Network Capture (TCP Flow)
+As part of the project requirements, we recorded the network traffic and filtered out the noise to isolate our system's communication (DHCP, DNS, and TCP FTP). 
+
+![Wireshark TCP Capture](captures/wireshark_tcp_screenshot.png)
+
+📥 **[Click here to download the raw Wireshark capture file (.pcapng)](captures/part1_tcp_flow.pcapng)**
