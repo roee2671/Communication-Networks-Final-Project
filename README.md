@@ -205,6 +205,77 @@ Target App Server IP: 127.0.0.3
 
 ---
 
+### Run #3 — February 2026 | RUDP Stop-and-Wait ARQ (File Transfer)
+
+**Test scope:** Full end-to-end file transfer over RUDP using the Stop-and-Wait ARQ reliability layer — DHCP → DNS → RUDP handshake → server-side HTTP fetch → chunked data delivery → FIN.  
+**New feature tested:** The App Server now fetches the requested URL, splits the response into fixed-size chunks (up to 500 bytes each), and delivers them one at a time. It waits for a matching ACK for each specific Sequence Number before advancing to the next chunk, then concludes the session with a FIN packet. The client reassembles the chunks in order and saves the result to disk.  
+**Status:** ✅ File transferred and saved successfully (`downloaded_rudp.html`, 65 bytes).
+
+---
+
+#### Phase 3 — RUDP: Stop-and-Wait ARQ File Transfer (UDP)
+
+> The full transfer protocol in action. The server fetches `http://127.0.0.1:8080/test_file.txt` (65 bytes), determines that 1 chunk is sufficient, sends it as `DATA Seq=1`, waits for `ACK=1` from the client, then signals end-of-transmission with a `FIN Seq=2`. The client ACKs the FIN, completing the session. Sequence numbers are precisely tracked throughout: `SYN Seq=100` → `SYN-ACK Ack=101` → `CMD Seq=101` → `CMD ACK Ack=101` → `DATA Seq=1` → `ACK=1` → `FIN Seq=2` → `FIN ACK Ack=2`.
+
+<table>
+<tr>
+<th>🖥️ RUDP Server — <code>app_server_rudp.py</code></th>
+<th>💻 RUDP Client — <code>client_rudp.py</code></th>
+</tr>
+<tr>
+<td>
+
+```text
+[RUDP Server] Listening on UDP 127.0.0.3:2122...
+
+[RUDP Server] Packet from ('127.0.0.1', 63121) | Seq=100 Ack=0 Flag='S' Len=0
+[RUDP Server] SYN received. Sending SYN-ACK...
+
+[RUDP Server] Packet from ('127.0.0.1', 63121) | Seq=101 Ack=0 Flag='D' Len=41
+[RUDP Server] Command: 'FETCH http://127.0.0.1:8080/test_file.txt'
+[RUDP Server] ACK sent for command.
+[RUDP Server] Fetching from internet: http://127.0.0.1:8080/test_file.txt
+[RUDP Server] Downloaded 65 bytes. Starting Stop-and-Wait transfer...
+[RUDP Server] 1 chunk(s) to send (500 bytes max each).
+[RUDP Server] Sent chunk 1/1 (Seq=1, 65 bytes). Waiting for ACK...
+[RUDP Server] ACK=1 confirmed. Chunk 1 delivered.
+[RUDP Server] All chunks delivered. Sending FIN...
+[RUDP Server] FIN sent. File transfer complete.
+
+[RUDP Server] Packet from ('127.0.0.1', 63121) | Seq=0 Ack=2 Flag='A' Len=0
+```
+
+</td>
+<td>
+
+```text
+[Client] 1. Sending 'DISCOVER' to DHCP server...
+[Client] -> My new IP: 127.0.0.2
+
+[Client] 2. DNS lookup for: my-app-server.local...
+[Client] -> my-app-server.local = 127.0.0.3
+
+[Client] 3. Starting RUDP connection to 127.0.0.3:2122...
+[Client] Sending SYN (Seq=100)...
+[Client] SYN-ACK received (Ack=101). Connection established.
+[Client] Sending command: 'FETCH http://127.0.0.1:8080/test_file.txt'
+[Client] Command ACKed (Ack=101). Server is now fetching the URL...
+[Client] Entering Stop-and-Wait receive loop...
+[Client] Received chunk Seq=1 (65 bytes). Buffer total: 65 bytes.
+[Client] FIN received (Seq=2). Transfer complete! Total bytes: 65.
+[Client] -> Success! Saved 'downloaded_rudp.html' (65 bytes).
+```
+
+</td>
+</tr>
+</table>
+
+---
+
+> **Note:** Both server and client outputs are captured verbatim from their respective terminals. `FIN Seq=2` is confirmed by the source: the server sends `build_packet(total_chunks + 1, ...)` = `build_packet(2, ...)` after all 1 chunk(s) are ACKed. The final `Seq=0 Ack=2 Flag='A'` line in the server log is the client's FIN-ACK arriving at the server's socket.
+
+---
+
 ### Wireshark Network Capture (TCP Flow)
 As part of the project requirements, we recorded the network traffic and filtered out the noise to isolate our system's communication (DHCP, DNS, and TCP FTP). 
 
@@ -220,3 +291,12 @@ As part of the project requirements, we recorded the RUDP network traffic and is
 ![Wireshark RUDP Capture](captures/wireshark_screenshot2.png)
 
 📥 **[Click here to download the raw Wireshark capture file (.pcapng)](captures/part2_flow.pcapng)**
+
+---
+
+### Wireshark Network Capture (RUDP Stop-and-Wait Flow)
+Network traffic captured during Run #3, filtered to show the full Stop-and-Wait ARQ session on port `2122`: SYN → SYN-ACK → DATA command → CMD-ACK → DATA chunk (Seq=1) → ACK=1 → FIN → FIN-ACK.
+
+![Wireshark RUDP Clean Flow Capture](captures/wireshark_screenshot3.png)
+
+📥 **[Click here to download the raw Wireshark capture file for the RUDP clean flow (.pcapng)](captures/part3_rudp_clean_flow.pcapng)**
