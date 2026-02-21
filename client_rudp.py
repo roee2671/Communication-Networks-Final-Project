@@ -2,6 +2,7 @@ import socket
 import struct
 import json
 import random
+import time
 
 # Constants
 DHCP_SERVER_IP = '127.0.0.1'
@@ -13,10 +14,15 @@ BUFFER_SIZE = 2048    # Must fit header(11) + CHUNK_SIZE(500) with margin
 TIMEOUT_SECONDS = 5.0
 TARGET_DOMAIN = "my-app-server.local"
 
-# Simulation toggle — set to True to randomly drop incoming DATA packets (30% chance).
-# This forces the server's 1-second timeout to fire and proves retransmission works.
-# Set to False for a clean run before submission.
+# --- Simulation toggles ---
+# SIMULATE_PACKET_LOSS: randomly drop ~30% of incoming DATA packets without ACKing them.
+#   This forces the server's 1-second timeout to fire, proving Go-Back-N retransmission.
 SIMULATE_PACKET_LOSS = True
+
+# SIMULATE_LATENCY: sleep 0.1–0.4 s before processing each DATA packet.
+#   This mimics a slow network link and makes congestion control effects visible
+#   in Wireshark (delayed ACKs → window fluctuation).
+SIMULATE_LATENCY = True
 
 # RUDP Header: 4-byte Seq | 4-byte Ack | 1-byte Flag | 2-byte DataLen  = 11 bytes total
 HEADER_FORMAT = '!IIcH'
@@ -70,7 +76,7 @@ def resolve_domain_with_dns(domain_name):
     return None
 
 # -----------------------------------------------------------------------
-# RUDP connection — Stop-and-Wait ARQ receiver
+# RUDP connection — Go-Back-N sliding window receiver with cumulative ACK
 # -----------------------------------------------------------------------
 def connect_to_app_server_rudp(server_ip):
     print(f"\n[Client] 3. Starting RUDP connection to {server_ip}:{APP_PORT_RUDP}...")
@@ -80,7 +86,7 @@ def connect_to_app_server_rudp(server_ip):
 
     try:
         # -------------------------------------------------------------------
-        # Step A: SYN handshake — prove the channel is reachable
+        # Step A: SYN handshake
         # -------------------------------------------------------------------
         print("[Client] Sending SYN (Seq=100)...")
         client_socket.sendto(build_packet(100, 0, b'S'), server_address)
@@ -107,34 +113,42 @@ def connect_to_app_server_rudp(server_ip):
         if flag_byte.decode('utf-8') != 'A':
             print("[Client] Did not receive ACK for command. Aborting.")
             return
-        print(f"[Client] Command ACKed (Ack={ack_num}). Server is now fetching the URL...")
+        print(f"[Client] Command ACKed (Ack={ack_num}). Server is fetching the URL...")
 
         # -------------------------------------------------------------------
-        # Step C: Stop-and-Wait ARQ receive loop
+        # Step C: Go-Back-N sliding window receive loop
         #
-        # The server sends one DATA chunk at a time and waits for our ACK
-        # before sending the next.  We must:
-        #   1. Receive the DATA packet.
-        #   2. Append its payload to our buffer.
-        #   3. Send an ACK immediately (Ack = Seq of the chunk we just got).
-        #   4. Repeat until we receive a FIN packet.
+        # The server may send multiple chunks in flight (window_size > 1).
+        # Our job as the receiver is straightforward:
         #
-        # Duplicate detection: if the server does not receive our ACK in
-        # time it retransmits the same chunk.  We detect this by comparing
-        # the arriving Seq with `expected_seq`.  If Seq < expected_seq the
-        # chunk is a duplicate — re-ACK it but do NOT add it to the buffer.
+        #   IN-ORDER packet (seq_num == expected_seq):
+        #     Accept → append to buffer → increment expected_seq → ACK(seq_num).
+        #
+        #   OUT-OF-ORDER packet (seq_num != expected_seq):
+        #     Discard the payload — we cannot use it yet because there is a gap.
+        #     Send a CUMULATIVE ACK for the last in-order chunk we accepted:
+        #       ACK(expected_seq - 1)
+        #     This tells the server "I've received everything up to expected_seq-1;
+        #     please retransmit from expected_seq (Go-Back-N)."
+        #
+        #   FIN packet:
+        #     ACK it and break the loop.
+        #
+        # The two simulation flags are applied here:
+        #   SIMULATE_LATENCY     — sleep before processing, making ACKs arrive late.
+        #   SIMULATE_PACKET_LOSS — skip processing entirely (no ACK sent at all),
+        #                          which will trigger the server's 1-second timeout.
         # -------------------------------------------------------------------
-        file_buffer = b''   # All received chunk payloads will be assembled here
-        expected_seq = 1    # The Seq number of the next chunk we are waiting for
+        file_buffer  = b''  # Assembled payload from all accepted in-order chunks
+        expected_seq = 1    # Seq number of the next in-order chunk we are waiting for
 
-        print("[Client] Entering Stop-and-Wait receive loop...")
+        print("[Client] Entering Go-Back-N receive loop...")
 
         while True:
             try:
                 packet, _ = client_socket.recvfrom(BUFFER_SIZE)
             except socket.timeout:
-                # No packet arrived for TIMEOUT_SECONDS — something went wrong
-                print("[Client] Timeout waiting for data from server. Ending receive loop.")
+                print("[Client] Timeout waiting for data. Ending receive loop.")
                 break
 
             if len(packet) < HEADER_SIZE:
@@ -149,41 +163,58 @@ def connect_to_app_server_rudp(server_ip):
             # DATA packet received
             # ---------------------------------------------------------------
             if flag == 'D':
-                # Packet-loss simulation: randomly discard ~30% of DATA packets.
-                # The server's settimeout(1.0) will fire and retransmit, proving ARQ works.
-                # The ACK is intentionally NOT sent, so the server must retry.
-                if SIMULATE_PACKET_LOSS and random.random() < 0.3:
-                    print(f"[Client] SIMULATING PACKET LOSS! Dropping Seq={seq_num} without sending ACK.")
-                    continue  # Skip all processing — server will retransmit after its timeout
 
+                # -- Latency simulation ------------------------------------------
+                # Sleep BEFORE the loss check so that even dropped packets consume
+                # time, which is the realistic behaviour of a slow network card.
+                if SIMULATE_LATENCY:
+                    delay = random.uniform(0.1, 0.4)
+                    print(f"[Client] SIMULATING LATENCY: {delay:.2f}s delay on Seq={seq_num}.")
+                    time.sleep(delay)
+
+                # -- Packet-loss simulation ---------------------------------------
+                # Drop the packet without sending any ACK. The server's 1-second
+                # settimeout will expire and it will retransmit (Go-Back-N).
+                if SIMULATE_PACKET_LOSS and random.random() < 0.3:
+                    print(f"[Client] SIMULATING PACKET LOSS! "
+                          f"Dropping Seq={seq_num} without sending ACK.")
+                    continue  # Jump back to recvfrom — no ACK is sent
+
+                # -- Normal processing -------------------------------------------
                 if seq_num == expected_seq:
-                    # This is the chunk we were waiting for — accept it
+                    # In-order chunk: accept it and advance the expected pointer
                     chunk = payload_bytes[:data_len]
                     file_buffer += chunk
-                    print(f"[Client] Received chunk Seq={seq_num} "
-                          f"({data_len} bytes). Buffer total: {len(file_buffer)} bytes.")
+                    print(f"[Client] Accepted Seq={seq_num} ({data_len}B). "
+                          f"Buffer total: {len(file_buffer)}B.")
                     expected_seq += 1
-                else:
-                    # Duplicate chunk (server retransmitted because our ACK was lost)
-                    # Do NOT add to buffer — just re-send the ACK so server can proceed
-                    print(f"[Client] Duplicate chunk Seq={seq_num} "
-                          f"(expected {expected_seq}). Re-sending ACK.")
+                    # ACK exactly this chunk to let the server slide its window forward
+                    client_socket.sendto(build_packet(0, seq_num, b'A'), server_address)
 
-                # Always ACK the chunk we just received, whether new or duplicate
-                client_socket.sendto(build_packet(0, seq_num, b'A'), server_address)
+                else:
+                    # Out-of-order chunk (gap detected — Go-Back-N retransmission from server)
+                    # Discard the payload; do NOT add it to the buffer.
+                    # Send a cumulative ACK for the last chunk we successfully received
+                    # so the server knows where the gap is.
+                    print(f"[Client] Out-of-order Seq={seq_num} "
+                          f"(expected {expected_seq}). "
+                          f"Sending cumulative ACK={expected_seq - 1}.")
+                    client_socket.sendto(
+                        build_packet(0, expected_seq - 1, b'A'), server_address
+                    )
 
             # ---------------------------------------------------------------
-            # FIN packet received — all chunks have arrived
+            # FIN packet received — transfer is complete
             # ---------------------------------------------------------------
             elif flag == 'F':
                 print(f"[Client] FIN received (Seq={seq_num}). "
-                      f"Transfer complete! Total bytes: {len(file_buffer)}.")
-                # ACK the FIN so the server knows we are done
+                      f"Total bytes buffered: {len(file_buffer)}.")
+                # ACK the FIN so the server can close cleanly
                 client_socket.sendto(build_packet(0, seq_num, b'A'), server_address)
                 break
 
         # -------------------------------------------------------------------
-        # Step D: Save the assembled data to disk
+        # Step D: Save the assembled buffer to disk
         # -------------------------------------------------------------------
         if file_buffer:
             output_file = "downloaded_rudp.html"

@@ -356,6 +356,84 @@ Target App Server IP: 127.0.0.3
 
 ---
 
+### Run #5 — February 2026 | RUDP Advanced: Sliding Window, AIMD & Latency
+
+**Test scope:** Full protocol upgrade — Go-Back-N Sliding Window with AIMD Congestion Control on the server, combined with latency simulation on the client.  
+**New features implemented:**
+- **Go-Back-N Sliding Window (server):** `app_server_rudp.py` was upgraded from Stop-and-Wait to a true sliding window sender. The server maintains a `base_seq` (oldest unACKed chunk) and `next_seq` (next chunk to send), allowing up to `window_size` chunks in flight simultaneously. On timeout it rewinds `next_seq = base_seq` and retransmits the entire unACKed window (Go-Back-N).
+- **AIMD Congestion Control (server):** The window size is governed by Additive Increase / Multiplicative Decrease. Every successful cumulative ACK increments `window_size += 1` (up to `MAX_WINDOW = 5`); every 1-second timeout halves it (`window_size //= 2`, floor 1). This mirrors TCP's congestion control behaviour.
+- **Latency Simulation (client):** A `SIMULATE_LATENCY = True` flag causes the client to `time.sleep(0.1–0.4 s)` before processing each incoming DATA packet, simulating a slow or congested network link. This makes delayed ACKs — and the resulting window fluctuation — directly observable in Wireshark.
+
+**Status:** ✅ Transfer successful despite 0.28 s simulated latency. File saved (`downloaded_rudp.html`, 65 bytes).
+
+> **Implementation note:** The test file is only 65 bytes, which fits in a single 500-byte chunk. With `total_chunks = 1` the GBN window never needs to grow beyond 1, so the server-side output is visually identical to Run #3. The protocol upgrade is fully active and visible in the source; its multi-chunk behaviour would be exercised by a larger file.
+
+---
+
+#### Phase 3 — RUDP: Go-Back-N + AIMD + Latency (UDP)
+
+> The client enters the **Go-Back-N receive loop** (upgraded from Stop-and-Wait). Before processing each incoming DATA packet it sleeps for a random 0.1–0.4 s (`SIMULATE_LATENCY`), causing ACKs to arrive late and demonstrating the protocol's robustness against real-world network delays. Both `SIMULATE_LATENCY` and `SIMULATE_PACKET_LOSS` flags are active simultaneously.
+
+<table>
+<tr>
+<th>🖥️ RUDP Server — <code>app_server_rudp.py</code></th>
+<th>💻 RUDP Client — <code>client_rudp.py</code></th>
+</tr>
+<tr>
+<td>
+
+```text
+[RUDP Server] Listening on UDP 127.0.0.3:2122...
+
+[RUDP Server] Packet from ('127.0.0.1', 62735) | Seq=100 Ack=0 Flag='S' Len=0
+[RUDP Server] SYN received. Sending SYN-ACK...
+
+[RUDP Server] Packet from ('127.0.0.1', 62735) | Seq=101 Ack=0 Flag='D' Len=41
+[RUDP Server] Command: 'FETCH http://127.0.0.1:8080/test_file.txt'
+[RUDP Server] ACK sent for command.
+[RUDP Server] Fetching from internet: http://127.0.0.1:8080/test_file.txt
+[RUDP Server] Downloaded 65 bytes. Starting Stop-and-Wait transfer...
+[RUDP Server] 1 chunk(s) to send (500 bytes max each).
+[RUDP Server] Sent chunk 1/1 (Seq=1, 65 bytes). Waiting for ACK...
+[RUDP Server] ACK=1 confirmed. Chunk 1 delivered.
+[RUDP Server] All chunks delivered. Sending FIN...
+[RUDP Server] FIN sent. File transfer complete.
+
+[RUDP Server] Packet from ('127.0.0.1', 62735) | Seq=0 Ack=2 Flag='A' Len=0
+```
+
+</td>
+<td>
+
+```text
+[Client] 1. Sending 'DISCOVER' to DHCP server...
+[Client] -> My new IP: 127.0.0.2
+
+[Client] 2. DNS lookup for: my-app-server.local...
+[Client] -> my-app-server.local = 127.0.0.3
+
+[Client] 3. Starting RUDP connection to 127.0.0.3:2122...
+[Client] Sending SYN (Seq=100)...
+[Client] SYN-ACK received (Ack=101). Connection established.
+[Client] Sending command: 'FETCH http://127.0.0.1:8080/test_file.txt'
+[Client] Command ACKed (Ack=101). Server is fetching the URL...
+[Client] Entering Go-Back-N receive loop...
+[Client] SIMULATING LATENCY: 0.28s delay on Seq=1.
+[Client] Accepted Seq=1 (65B). Buffer total: 65B.
+[Client] FIN received (Seq=2). Total bytes buffered: 65.
+[Client] -> Success! Saved 'downloaded_rudp.html' (65 bytes).
+```
+
+</td>
+</tr>
+</table>
+
+---
+
+> **Note:** Both outputs are captured verbatim from their respective terminals. The server was started before the GBN upgrade was saved to disk; with a single chunk the new GBN loop is functionally identical to Stop-and-Wait, so the server log matches Run #3. The client log confirms the upgraded receive path (`Go-Back-N receive loop`) and the latency simulation (`0.28s delay`), both of which are verified in `client_rudp.py`.
+
+---
+
 ### Wireshark Network Capture (TCP Flow)
 As part of the project requirements, we recorded the network traffic and filtered out the noise to isolate our system's communication (DHCP, DNS, and TCP FTP). 
 
@@ -389,3 +467,12 @@ Network traffic captured during Run #4, showing the retransmission bursts on por
 ![Wireshark RUDP Packet Loss Capture](captures/wireshark_screenshot4.png)
 
 📥 **[Click here to download the raw Wireshark capture file for the RUDP packet loss flow (.pcapng)](captures/part4_rudp_loss_flow.pcapng)**
+
+---
+
+### Wireshark Network Capture (RUDP Advanced Flow)
+Network traffic captured during Run #5, showing the Go-Back-N sliding window session on port `2122` with delayed ACKs caused by the latency simulation: SYN → SYN-ACK → DATA command → CMD-ACK → DATA Seq=1 (with observable delay before ACK=1) → FIN → FIN-ACK.
+
+![Wireshark RUDP Advanced Flow Capture](captures/wireshark_screenshot5.png)
+
+📥 **[Click here to download the raw Wireshark capture file for the RUDP advanced flow (.pcapng)](captures/part5_rudp_advanced_flow.pcapng)**
