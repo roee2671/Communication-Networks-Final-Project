@@ -1,6 +1,7 @@
 import socket
 import struct
 import json
+import random
 
 # Constants
 DHCP_SERVER_IP = '127.0.0.1'
@@ -11,6 +12,11 @@ APP_PORT_RUDP = 2122
 BUFFER_SIZE = 2048    # Must fit header(11) + CHUNK_SIZE(500) with margin
 TIMEOUT_SECONDS = 5.0
 TARGET_DOMAIN = "my-app-server.local"
+
+# Simulation toggle — set to True to randomly drop incoming DATA packets (30% chance).
+# This forces the server's 1-second timeout to fire and proves retransmission works.
+# Set to False for a clean run before submission.
+SIMULATE_PACKET_LOSS = True
 
 # RUDP Header: 4-byte Seq | 4-byte Ack | 1-byte Flag | 2-byte DataLen  = 11 bytes total
 HEADER_FORMAT = '!IIcH'
@@ -143,6 +149,13 @@ def connect_to_app_server_rudp(server_ip):
             # DATA packet received
             # ---------------------------------------------------------------
             if flag == 'D':
+                # Packet-loss simulation: randomly discard ~30% of DATA packets.
+                # The server's settimeout(1.0) will fire and retransmit, proving ARQ works.
+                # The ACK is intentionally NOT sent, so the server must retry.
+                if SIMULATE_PACKET_LOSS and random.random() < 0.3:
+                    print(f"[Client] SIMULATING PACKET LOSS! Dropping Seq={seq_num} without sending ACK.")
+                    continue  # Skip all processing — server will retransmit after its timeout
+
                 if seq_num == expected_seq:
                     # This is the chunk we were waiting for — accept it
                     chunk = payload_bytes[:data_len]

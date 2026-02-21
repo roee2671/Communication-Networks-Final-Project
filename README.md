@@ -276,6 +276,86 @@ Target App Server IP: 127.0.0.3
 
 ---
 
+### Run #4 — February 2026 | RUDP Packet Loss & Retransmission Simulation
+
+**Test scope:** Proof of reliability — the Stop-and-Wait ARQ protocol correctly recovers from simulated packet loss through automatic server retransmission.  
+**New feature tested:** A `SIMULATE_PACKET_LOSS = True` flag was added to `client_rudp.py`. When enabled, the client intentionally drops approximately 30% of incoming `D` (DATA) packets and withholds the ACK entirely — as if the packet never arrived. This forces the server's 1.0-second `settimeout` to fire and retransmit the same chunk, proving that the ARQ loop is both correct and robust. The final file is still assembled and saved without corruption.  
+**Status:** ✅ 3 drops simulated → 3 server retransmissions → successful delivery on 4th attempt.
+
+---
+
+#### Phase 3 — RUDP: Packet Loss & ARQ Recovery (UDP)
+
+> The server sends `DATA Seq=1` four times in total. The client silently drops the first three (no ACK sent), triggering three consecutive 1-second server timeouts. On the fourth transmission the client accepts the chunk, sends `ACK=1`, and the transfer concludes normally with a `FIN`. The final file content is identical to Run #3 — proving that Stop-and-Wait ARQ delivers exactly-once semantics even under loss.
+
+<table>
+<tr>
+<th>🖥️ RUDP Server — <code>app_server_rudp.py</code></th>
+<th>💻 RUDP Client — <code>client_rudp.py</code></th>
+</tr>
+<tr>
+<td>
+
+```text
+[RUDP Server] Listening on UDP 127.0.0.3:2122...
+
+[RUDP Server] Packet from ('127.0.0.1', 58314) | Seq=100 Ack=0 Flag='S' Len=0
+[RUDP Server] SYN received. Sending SYN-ACK...
+
+[RUDP Server] Packet from ('127.0.0.1', 58314) | Seq=101 Ack=0 Flag='D' Len=41
+[RUDP Server] Command: 'FETCH http://127.0.0.1:8080/test_file.txt'
+[RUDP Server] ACK sent for command.
+[RUDP Server] Fetching from internet: http://127.0.0.1:8080/test_file.txt
+[RUDP Server] Downloaded 65 bytes. Starting Stop-and-Wait transfer...
+[RUDP Server] 1 chunk(s) to send (500 bytes max each).
+[RUDP Server] Sent chunk 1/1 (Seq=1, 65 bytes). Waiting for ACK...
+[RUDP Server] Timeout! No ACK for chunk 1. Retransmitting...
+[RUDP Server] Sent chunk 1/1 (Seq=1, 65 bytes). Waiting for ACK...
+[RUDP Server] Timeout! No ACK for chunk 1. Retransmitting...
+[RUDP Server] Sent chunk 1/1 (Seq=1, 65 bytes). Waiting for ACK...
+[RUDP Server] Timeout! No ACK for chunk 1. Retransmitting...
+[RUDP Server] Sent chunk 1/1 (Seq=1, 65 bytes). Waiting for ACK...
+[RUDP Server] ACK=1 confirmed. Chunk 1 delivered.
+[RUDP Server] All chunks delivered. Sending FIN...
+[RUDP Server] FIN sent. File transfer complete.
+
+[RUDP Server] Packet from ('127.0.0.1', 58314) | Seq=0 Ack=2 Flag='A' Len=0
+```
+
+</td>
+<td>
+
+```text
+[Client] 1. Sending 'DISCOVER' to DHCP server...
+[Client] -> My new IP: 127.0.0.2
+
+[Client] 2. DNS lookup for: my-app-server.local...
+[Client] -> my-app-server.local = 127.0.0.3
+
+[Client] 3. Starting RUDP connection to 127.0.0.3:2122...
+[Client] Sending SYN (Seq=100)...
+[Client] SYN-ACK received (Ack=101). Connection established.
+[Client] Sending command: 'FETCH http://127.0.0.1:8080/test_file.txt'
+[Client] Command ACKed (Ack=101). Server is now fetching the URL...
+[Client] Entering Stop-and-Wait receive loop...
+[Client] SIMULATING PACKET LOSS! Dropping Seq=1 without sending ACK.
+[Client] SIMULATING PACKET LOSS! Dropping Seq=1 without sending ACK.
+[Client] SIMULATING PACKET LOSS! Dropping Seq=1 without sending ACK.
+[Client] Received chunk Seq=1 (65 bytes). Buffer total: 65 bytes.
+[Client] FIN received (Seq=2). Transfer complete! Total bytes: 65.
+[Client] -> Success! Saved 'downloaded_rudp.html' (65 bytes).
+```
+
+</td>
+</tr>
+</table>
+
+---
+
+> **Note:** Both server and client outputs are captured verbatim from their respective terminals. Each `Timeout! No ACK for chunk 1` on the server corresponds exactly to one `SIMULATING PACKET LOSS! Dropping Seq=1` on the client — three rounds of loss, three retransmissions, one successful delivery.
+
+---
+
 ### Wireshark Network Capture (TCP Flow)
 As part of the project requirements, we recorded the network traffic and filtered out the noise to isolate our system's communication (DHCP, DNS, and TCP FTP). 
 
@@ -300,3 +380,12 @@ Network traffic captured during Run #3, filtered to show the full Stop-and-Wait 
 ![Wireshark RUDP Clean Flow Capture](captures/wireshark_screenshot3.png)
 
 📥 **[Click here to download the raw Wireshark capture file for the RUDP clean flow (.pcapng)](captures/part3_rudp_clean_flow.pcapng)**
+
+---
+
+### Wireshark Network Capture (RUDP Packet Loss Flow)
+Network traffic captured during Run #4, showing the retransmission bursts on port `2122`: the server repeatedly sends `DATA Seq=1` after each 1-second timeout until `ACK=1` is finally received, followed by `FIN` and `FIN-ACK`.
+
+![Wireshark RUDP Packet Loss Capture](captures/wireshark_screenshot4.png)
+
+📥 **[Click here to download the raw Wireshark capture file for the RUDP packet loss flow (.pcapng)](captures/part4_rudp_loss_flow.pcapng)**
