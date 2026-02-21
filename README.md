@@ -143,6 +143,6 @@ Target App Server IP: 127.0.0.3
 ### Wireshark Network Capture (TCP Flow)
 As part of the project requirements, we recorded the network traffic and filtered out the noise to isolate our system's communication (DHCP, DNS, and TCP FTP). 
 
-![Wireshark TCP Capture](captures/wireshark_tcp_screenshot.png)
+![Wireshark TCP Capture](captures/wireshark_screenshot.png)
 
-📥 **[Click here to download the raw Wireshark capture file (.pcapng)](captures/part1_tcp_flow.pcapng)**
+📥 **[Click here to download the raw Wireshark capture file (.pcapng)](captures/part1_flow.pcapng)**
