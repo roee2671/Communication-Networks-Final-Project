@@ -7,7 +7,7 @@ DNS_SERVER_PORT = 5353 # Standard DNS is 53, we use 5353 for local testing witho
 
 # Our "Phonebook" - mapping domain names to IP addresses
 DNS_RECORDS = {
-    "my-ftp-server.local": "127.0.0.3", # This will be our future FTP server
+    "my-app-server.local": "127.0.0.3", # Pivot: renamed from my-ftp-server.local to my-app-server.local
     "google.com": "8.8.8.8"             # Just for testing
 }
 

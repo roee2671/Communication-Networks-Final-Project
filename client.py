@@ -8,9 +8,9 @@ DNS_SERVER_IP = '127.0.0.1'
 DNS_SERVER_PORT = 5353
 BUFFER_SIZE = 1024
 TIMEOUT_SECONDS = 5.0
-TARGET_DOMAIN = "my-ftp-server.local"
-FTP_PORT = 2121          # Must match FTP_PORT_TCP in ftp_server.py
-LENGTH_HEADER_SIZE = 10  # Must match LENGTH_HEADER_SIZE in ftp_server.py
+TARGET_DOMAIN = "my-app-server.local"  # Pivot: updated from my-ftp-server.local
+APP_SERVER_PORT = 2121                 # Must match APP_SERVER_PORT in app_server.py
+LENGTH_HEADER_SIZE = 10                # Must match LENGTH_HEADER_SIZE in app_server.py
 
 def request_ip_from_dhcp():
     """Step 1: Get an IP address for the client."""
@@ -81,60 +81,34 @@ def receive_all(sock):
         data += chunk
     return data
 
-def connect_to_ftp_tcp(server_ip):
-    """Step 3: Connect to the FTP server via TCP, list files, then download one."""
-
-    # --- Connection 1: LIST ---
-    # Each command uses its own TCP connection (server closes after one command)
+def connect_to_app_server(server_ip):
+    """Step 3: Connect to the HTTP proxy server and ask it to fetch a URL for us."""
+    # Pivot: replaced two-step LIST+DOWNLOAD with a single FETCH command
     client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
-        print(f"\n[Client] 3a. Connecting to FTP Server at {server_ip}:{FTP_PORT} for LIST...")
-        client_socket.connect((server_ip, FTP_PORT))
+        print(f"\n[Client] 3. Connecting to App Server at {server_ip}:{APP_SERVER_PORT}...")
+        client_socket.connect((server_ip, APP_SERVER_PORT))
 
-        # Send the LIST command framed with a 10-byte length header
-        send_command(client_socket, "LIST")
-
-        # Receive the file list using the same framing
-        data = receive_all(client_socket)
-
-        print("\n=== Available Files on Server ===")
-        files = data.decode('utf-8').split(",")
-        for i, file_name in enumerate(files):
-            print(f"{i + 1}. {file_name}")
-        print("=================================")
-
-    except Exception as e:
-        print(f"[Client] Failed to get file list: {e}")
-        return  # No point continuing to DOWNLOAD if LIST already failed
-    finally:
-        client_socket.close()
-
-    # --- Connection 2: DOWNLOAD ---
-    client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        print(f"\n[Client] 3b. Connecting to FTP Server at {server_ip}:{FTP_PORT} for DOWNLOAD...")
-        client_socket.connect((server_ip, FTP_PORT))
-
-        # Frame the DOWNLOAD command with a 10-byte length header before sending
-        command = "DOWNLOAD test_file.txt"
+        # Send a FETCH command — the server will make the real HTTP request on our behalf
+        command = "FETCH http://127.0.0.1:8080/test_file.txt"
         print(f"[Client] Sending command: '{command}'")
         send_command(client_socket, command)
 
-        # Receive the server's response (file bytes, or an ERROR string)
-        file_data = receive_all(client_socket)
+        # Receive the full response (HTML bytes, or an ERROR string) using framing
+        response_data = receive_all(client_socket)
 
-        # If the response starts with "ERROR", the file was not found on the server
-        if file_data.startswith(b"ERROR"):
-            print(f"[Client] -> Server error: {file_data.decode('utf-8')}")
+        # If the server returned an error, print it instead of saving garbage to disk
+        if response_data.startswith(b"ERROR"):
+            print(f"[Client] -> Server error: {response_data.decode('utf-8')}")
         else:
-            # Save the raw bytes to disk in binary write mode
-            output_filename = "downloaded_test_file.txt"
+            # Save the downloaded HTML bytes to disk
+            output_filename = "downloaded_from_web.html"
             with open(output_filename, 'wb') as f:
-                f.write(file_data)
-            print(f"[Client] -> Success! Saved '{output_filename}' ({len(file_data)} bytes)")
+                f.write(response_data)
+            print(f"[Client] -> Success! Saved '{output_filename}' ({len(response_data)} bytes)")
 
     except Exception as e:
-        print(f"[Client] Failed to download file: {e}")
+        print(f"[Client] Failed to communicate with app server: {e}")
     finally:
         client_socket.close()
 
@@ -146,12 +120,12 @@ if __name__ == "__main__":
 
     if my_ip:
         # Step 2: DNS
-        ftp_server_ip = resolve_domain_with_dns(TARGET_DOMAIN)
+        app_server_ip = resolve_domain_with_dns(TARGET_DOMAIN)
 
-        if ftp_server_ip:
+        if app_server_ip:
             print("\n=== Network Initialization Complete ===")
             print(f"My IP: {my_ip}")
-            print(f"Target FTP Server IP: {ftp_server_ip}")
+            print(f"Target App Server IP: {app_server_ip}")
 
-            # Step 3: Connect to FTP server (list files + download)
-            connect_to_ftp_tcp(ftp_server_ip)
+            # Step 3: Connect to the HTTP proxy server and fetch a URL
+            connect_to_app_server(app_server_ip)
