@@ -1,49 +1,60 @@
 import socket
 import json
 
-# Constants - No magic numbers
-DHCP_SERVER_IP = '127.0.0.1'
-DHCP_SERVER_PORT = 6767 # Standard DHCP uses 67, we use 6767 to avoid needing admin rights
-OFFERED_IP = '127.0.0.2' # The fake IP we will give to our client
+# DHCP Server - Phase 1
+# DHCP (Dynamic Host Configuration Protocol) assigns IP addresses to clients
+# when they first join a network. The client sends a DISCOVER broadcast and
+# this server responds with an OFFER containing an available IP address.
+# UDP is used because the client has no IP yet and cannot perform a TCP handshake.
+
+SERVER_IP   = '127.0.0.1'
+SERVER_PORT = 6767       # Standard DHCP uses port 67; we use 6767 to avoid requiring admin rights.
+OFFERED_IP  = '127.0.0.2'  # The IP address assigned to all clients in this simulation.
+
 
 def start_dhcp_server():
-    # 1. Create a UDP socket (SOCK_DGRAM means UDP)
-    server_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    # Fix: SO_REUSEADDR lets us restart the server without "Address already in use" errors
-    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    print("starting DHCP server...")
 
-    # 2. Bind the socket to the IP and Port
-    server_socket.bind((DHCP_SERVER_IP, DHCP_SERVER_PORT))
-    
-    print(f"[DHCP Server] Listening on {DHCP_SERVER_IP}:{DHCP_SERVER_PORT}...")
-    
+    # SOCK_DGRAM creates a UDP socket.
+    server_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    # SO_REUSEADDR prevents "Address already in use" errors when restarting during development.
+    server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+    server_sock.bind((SERVER_IP, SERVER_PORT))
+    print(f"DHCP server listening on {SERVER_IP}:{SERVER_PORT}")
+
     while True:
-        # Fix: Wrap each iteration so a bad/malformed packet can't crash the entire server
+        print("waiting for DHCP request...")
+
+        raw_data    = None
+        client_addr = None
         try:
-            # 3. Wait to receive a message from a client
-            # 1024 is the maximum buffer size in bytes
-            data, client_address = server_socket.recvfrom(1024)
-
-            # Decode the bytes into a string
-            message = data.decode('utf-8')
-            print(f"[DHCP Server] Received: '{message}' from {client_address}")
-
-            # 4. Check if the client is asking for an IP
-            if message == "DISCOVER":
-                # 5. Prepare the OFFER response using JSON
-                response = {
-                    "type": "OFFER",
-                    "assigned_ip": OFFERED_IP
-                }
-
-                # Convert JSON back to bytes
-                response_bytes = json.dumps(response).encode('utf-8')
-
-                # 6. Send the offer back to the client
-                server_socket.sendto(response_bytes, client_address)
-                print(f"[DHCP Server] Sent OFFER ({OFFERED_IP}) to {client_address}")
+            raw_data, client_addr = server_sock.recvfrom(1024)
         except Exception as e:
-            print(f"[DHCP Server] Error handling packet: {e}")
+            print(f"error receiving packet: {e}")
+            continue
+
+        if raw_data is None:
+            continue
+
+        message = raw_data.decode('utf-8')
+        print(f"received '{message}' from {client_addr}")
+
+        if message == "DISCOVER":
+            print(f"DISCOVER received. sending OFFER (ip={OFFERED_IP})")
+
+            # Build the OFFER response as a JSON object and encode to bytes.
+            offer      = {"type": "OFFER", "assigned_ip": OFFERED_IP}
+            offer_json = json.dumps(offer)
+            offer_bytes = offer_json.encode('utf-8')
+
+            server_sock.sendto(offer_bytes, client_addr)
+            print(f"OFFER sent to {client_addr}")
+
+        else:
+            print(f"unknown message type: '{message}'. ignoring.")
+
 
 if __name__ == "__main__":
     start_dhcp_server()

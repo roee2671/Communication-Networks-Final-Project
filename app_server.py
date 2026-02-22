@@ -1,76 +1,95 @@
 import socket
 import urllib.request
 
-# Pivot: This server is now an HTTP Proxy/Downloader (replaces the old FTP server).
-# The client sends a "FETCH <url>" command, and this server fetches the URL from
-# the real internet using Python's built-in urllib, then forwards the raw bytes
-# back to the client using our standard 10-byte length-prefix framing.
+# App Server (HTTP Proxy) - Phase 2
+# This server acts as an HTTP proxy. The client sends a "FETCH <url>" command
+# and this server downloads the resource using urllib and forwards the bytes back.
+#
+# TCP Framing:
+# TCP is a stream protocol with no built-in message boundaries. To prevent partial
+# reads, we prepend a 10-byte zero-padded length field before each payload.
+# The receiver reads 10 bytes first, converts to int, then reads exactly that many more.
 
-APP_SERVER_IP = '127.0.0.3'  # Must match the "my-app-server.local" record in dns_server.py
-APP_SERVER_PORT = 2121        # Port our custom application server listens on
-BUFFER_SIZE = 1024
-LENGTH_HEADER_SIZE = 10       # Number of bytes reserved for the message length prefix
+APP_SERVER_IP      = '127.0.0.3'  # Must match the DNS record for "my-app-server.local".
+APP_SERVER_PORT    = 2121
+BUFFER_SIZE        = 1024
+LENGTH_HEADER_SIZE = 10           # Must match LENGTH_HEADER_SIZE in client.py.
 
-def send_framed(sock, payload_bytes):
-    """Prepend a 10-byte zero-padded length header, then send the full payload in one call."""
-    length_header = str(len(payload_bytes)).zfill(LENGTH_HEADER_SIZE).encode('utf-8')
-    sock.send(length_header + payload_bytes)
+
+def send_framed(sock, data):
+    # TCP is a stream protocol, so we prepend a 10-byte length header to delimit messages.
+    # Format: [10-char zero-padded length string][payload bytes]
+    length_str = str(len(data)).zfill(LENGTH_HEADER_SIZE)
+    header     = length_str.encode('utf-8')
+    print(f"sending {len(data)} bytes (header='{length_str}')")
+    sock.send(header + data)
+
 
 def start_app_server():
-    # 1. Create a TCP socket
-    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    # SO_REUSEADDR lets us restart the server without "Address already in use" errors
-    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    print("starting app server (HTTP proxy)...")
 
-    # 2. Bind and listen for incoming connections
-    server_socket.bind((APP_SERVER_IP, APP_SERVER_PORT))
-    server_socket.listen(1)
-
-    print(f"[App Server] HTTP Proxy started. Listening on TCP {APP_SERVER_IP}:{APP_SERVER_PORT}...")
+    server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server_sock.bind((APP_SERVER_IP, APP_SERVER_PORT))
+    server_sock.listen(1)
+    print(f"listening on TCP {APP_SERVER_IP}:{APP_SERVER_PORT}")
 
     while True:
-        # 3. Accept a client connection
-        client_socket, client_address = server_socket.accept()
-        print(f"\n[App Server] Client connected from {client_address}")
+        print("waiting for client connection...")
+        client_sock, client_addr = server_sock.accept()
+        print(f"client connected from {client_addr}")
 
-        # Use try/finally so client_socket is always closed, even if an error occurs
         try:
-            # 4. Read the 10-byte header to find out how long the incoming command is
-            raw_header = client_socket.recv(LENGTH_HEADER_SIZE)
-            cmd_length = int(raw_header.decode('utf-8'))
+            # Step 1: Read the 10-byte length header.
+            print("reading length header...")
+            header_bytes = client_sock.recv(LENGTH_HEADER_SIZE)
 
-            # 5. Read exactly that many bytes to get the full command text
-            data = client_socket.recv(cmd_length).decode('utf-8')
-            print(f"[App Server] Received command: '{data}'")
+            if len(header_bytes) < LENGTH_HEADER_SIZE:
+                print(f"header too short ({len(header_bytes)} bytes). closing.")
+                client_sock.close()
+                continue
 
-            # 6. Handle the "FETCH <url>" command — act as an HTTP proxy
-            if data.startswith("FETCH "):
-                # Extract the URL: everything after the "FETCH " prefix
-                url = data[len("FETCH "):]
-                print(f"[App Server] Fetching from internet: {url}")
+            cmd_length = int(header_bytes.decode('utf-8'))
+            print(f"command length: {cmd_length} bytes")
 
+            # Step 2: Read exactly cmd_length bytes for the command string.
+            print("reading command...")
+            cmd_bytes = client_sock.recv(cmd_length)
+            command   = cmd_bytes.decode('utf-8')
+            print(f"received command: '{command}'")
+
+            # Step 3: Dispatch on the command type.
+            if command.startswith("FETCH "):
+                url = command[len("FETCH "):]
+                print(f"fetching: {url}")
+
+                downloaded_bytes = None
+                error_msg        = ""
                 try:
-                    # Use a browser-like User-Agent header so servers don't reject the request
-                    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-                    # urlopen makes the real HTTP request; .read() downloads the full response body
-                    web_content = urllib.request.urlopen(req, timeout=10).read()
-                    send_framed(client_socket, web_content)
-                    print(f"[App Server] Fetched {len(web_content)} bytes, sent to client.")
-                except Exception as fetch_error:
-                    # If the real HTTP request fails, send a framed error so the client can read it
-                    error_msg = f"ERROR: Could not fetch URL '{url}'. Reason: {fetch_error}"
-                    send_framed(client_socket, error_msg.encode('utf-8'))
-                    print(f"[App Server] Fetch failed: {fetch_error}")
+                    req              = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+                    downloaded_bytes = urllib.request.urlopen(req, timeout=10).read()
+                    print(f"download complete: {len(downloaded_bytes)} bytes")
+                except Exception as e:
+                    error_msg = str(e)
+                    print(f"download failed: {e}")
+
+                if downloaded_bytes is not None:
+                    send_framed(client_sock, downloaded_bytes)
+                else:
+                    error_text = f"ERROR: Could not fetch '{url}'. Reason: {error_msg}"
+                    send_framed(client_sock, error_text.encode('utf-8'))
 
             else:
-                error_msg = "ERROR: Unknown command. Use: FETCH <url>"
-                send_framed(client_socket, error_msg.encode('utf-8'))
+                print(f"unknown command: '{command}'")
+                send_framed(client_sock, b"ERROR: Unknown command. Use: FETCH <url>")
 
         except Exception as e:
-            print(f"[App Server] An error occurred: {e}")
-        finally:
-            # Always close the client socket to free up the connection
-            client_socket.close()
+            print(f"error handling client: {e}")
+
+        print(f"closing connection with {client_addr}")
+        client_sock.close()
+        print("ready for next client.")
+
 
 if __name__ == "__main__":
     start_app_server()

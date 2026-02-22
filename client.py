@@ -1,131 +1,188 @@
 import socket
 import json
 
-# Constants - No magic numbers
-DHCP_SERVER_IP = '127.0.0.1'
-DHCP_SERVER_PORT = 6767
-DNS_SERVER_IP = '127.0.0.1'
-DNS_SERVER_PORT = 5353
-BUFFER_SIZE = 1024
-TIMEOUT_SECONDS = 5.0
-TARGET_DOMAIN = "my-app-server.local"  # Pivot: updated from my-ftp-server.local
-APP_SERVER_PORT = 2121                 # Must match APP_SERVER_PORT in app_server.py
-LENGTH_HEADER_SIZE = 10                # Must match LENGTH_HEADER_SIZE in app_server.py
+# TCP Client - Phase 1 and 2
+# Performs the full network initialization sequence:
+#   Step 1 - DHCP: request an IP address.
+#   Step 2 - DNS:  resolve the app server's domain name to an IP.
+#   Step 3 - App:  connect over TCP, send a FETCH command, receive the file.
+#
+# TCP Framing:
+# TCP is a stream protocol, so we prepend a 10-byte length header to avoid
+# fragmentation issues. The receiver reads 10 bytes first to determine message length.
 
-def request_ip_from_dhcp():
-    """Step 1: Get an IP address for the client."""
-    client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    client_socket.settimeout(TIMEOUT_SECONDS)
+DHCP_SERVER_IP     = '127.0.0.1'
+DHCP_SERVER_PORT   = 6767
+DNS_SERVER_IP      = '127.0.0.1'
+DNS_SERVER_PORT    = 5353
+BUFFER_SIZE        = 1024
+TIMEOUT            = 5.0
+TARGET_DOMAIN      = "my-app-server.local"
+APP_SERVER_PORT    = 2121  # Must match APP_SERVER_PORT in app_server.py.
+LENGTH_HEADER_SIZE = 10    # Must match LENGTH_HEADER_SIZE in app_server.py.
 
-    try:
-        message = "DISCOVER"
-        print(f"\n[Client] 1. Sending '{message}' to DHCP server...")
-        client_socket.sendto(message.encode('utf-8'), (DHCP_SERVER_IP, DHCP_SERVER_PORT))
 
-        data, _ = client_socket.recvfrom(BUFFER_SIZE)
-        response = json.loads(data.decode('utf-8'))
+def send_framed(sock, text):
+    # Encode the text to bytes and prepend a 10-byte zero-padded length header.
+    cmd_bytes  = text.encode('utf-8')
+    length_str = str(len(cmd_bytes)).zfill(LENGTH_HEADER_SIZE)
+    header     = length_str.encode('utf-8')
+    print(f"sending: '{text}' ({len(cmd_bytes)} bytes)")
+    sock.send(header + cmd_bytes)
 
-        if response.get("type") == "OFFER":
-            assigned_ip = response.get("assigned_ip")
-            print(f"[Client] -> Success! My new IP is: {assigned_ip}")
-            return assigned_ip
-    except socket.timeout:
-        print("[Client] -> Error: DHCP Server timeout.")
-    finally:
-        client_socket.close()
-    return None
 
-def resolve_domain_with_dns(domain_name):
-    """Step 2: Ask DNS server for the IP of our target domain."""
-    client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    client_socket.settimeout(TIMEOUT_SECONDS)
+def receive_framed(sock):
+    # Read the 10-byte length header, then loop until all expected bytes are received.
+    # TCP may deliver data in fragments, so a single recv() call is not sufficient.
+    print("reading length header...")
+    header = sock.recv(LENGTH_HEADER_SIZE)
 
-    try:
-        request = {"domain": domain_name}
-        print(f"\n[Client] 2. Asking DNS server for IP of: {domain_name}...")
+    if len(header) < LENGTH_HEADER_SIZE:
+        print(f"header too short ({len(header)} bytes). returning empty.")
+        return b''
 
-        client_socket.sendto(json.dumps(request).encode('utf-8'), (DNS_SERVER_IP, DNS_SERVER_PORT))
+    total_expected = int(header.decode('utf-8'))
+    print(f"expecting {total_expected} bytes...")
 
-        data, _ = client_socket.recvfrom(BUFFER_SIZE)
-        response = json.loads(data.decode('utf-8'))
+    received_bytes = b''
+    while len(received_bytes) < total_expected:
+        remaining  = total_expected - len(received_bytes)
 
-        if response.get("status") == "SUCCESS":
-            resolved_ip = response.get("ip")
-            print(f"[Client] -> Success! The IP for {domain_name} is: {resolved_ip}")
-            return resolved_ip
+        if remaining > BUFFER_SIZE:
+            to_receive = BUFFER_SIZE
         else:
-            print(f"[Client] -> Error: Domain {domain_name} not found in DNS.")
-    except socket.timeout:
-        print("[Client] -> Error: DNS Server timeout.")
-    finally:
-        client_socket.close()
-    return None
+            to_receive = remaining
 
-def send_command(sock, command_str):
-    """Frame a command string with a 10-byte length header and send it."""
-    payload = command_str.encode('utf-8')
-    length_header = str(len(payload)).zfill(LENGTH_HEADER_SIZE).encode('utf-8')
-    sock.send(length_header + payload)
+        print(f"  received {len(received_bytes)}/{total_expected}. requesting {to_receive} more...")
+        chunk = sock.recv(to_receive)
 
-def receive_all(sock):
-    """Read the 10-byte length header, then read exactly that many bytes and return them."""
-    raw_header = sock.recv(LENGTH_HEADER_SIZE)
-    msg_length = int(raw_header.decode('utf-8'))
-
-    # Loop until every byte has arrived (TCP may split data across multiple recv calls)
-    data = b''
-    while len(data) < msg_length:
-        chunk = sock.recv(min(BUFFER_SIZE, msg_length - len(data)))
         if not chunk:
-            break  # Server closed the connection unexpectedly
-        data += chunk
-    return data
+            print("connection closed by server before all data was received.")
+            break
 
-def connect_to_app_server(server_ip):
-    """Step 3: Connect to the HTTP proxy server and ask it to fetch a URL for us."""
-    # Pivot: replaced two-step LIST+DOWNLOAD with a single FETCH command
-    client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        received_bytes = received_bytes + chunk
+
+    print(f"receive complete: {len(received_bytes)} bytes total.")
+    return received_bytes
+
+
+# -------------------------------------------------------
+# Step 1: Request an IP address from the DHCP server.
+# -------------------------------------------------------
+def request_ip_from_dhcp():
+    print("\n--- step 1: DHCP ---")
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(TIMEOUT)
+
+    print(f"sending DISCOVER to {DHCP_SERVER_IP}:{DHCP_SERVER_PORT}...")
+    sock.sendto(b"DISCOVER", (DHCP_SERVER_IP, DHCP_SERVER_PORT))
+
+    reply_bytes = None
     try:
-        print(f"\n[Client] 3. Connecting to App Server at {server_ip}:{APP_SERVER_PORT}...")
-        client_socket.connect((server_ip, APP_SERVER_PORT))
+        reply_bytes, _ = sock.recvfrom(BUFFER_SIZE)
+    except Exception as e:
+        print(f"DHCP timeout or error: {e}")
 
-        # Send a FETCH command — the server will make the real HTTP request on our behalf
+    sock.close()
+
+    if reply_bytes is None:
+        print("no reply from DHCP server.")
+        return None
+
+    reply = json.loads(reply_bytes.decode('utf-8'))
+    print(f"DHCP reply: {reply}")
+
+    if reply.get("type") == "OFFER":
+        assigned_ip = reply.get("assigned_ip")
+        print(f"assigned IP: {assigned_ip}")
+        return assigned_ip
+
+    print("reply was not a valid OFFER.")
+    return None
+
+
+# -------------------------------------------------------
+# Step 2: Resolve the target domain name using DNS.
+# -------------------------------------------------------
+def resolve_domain_with_dns(domain):
+    print(f"\n--- step 2: DNS ---")
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(TIMEOUT)
+
+    query = json.dumps({"domain": domain}).encode('utf-8')
+    print(f"querying DNS for '{domain}'...")
+    sock.sendto(query, (DNS_SERVER_IP, DNS_SERVER_PORT))
+
+    reply_bytes = None
+    try:
+        reply_bytes, _ = sock.recvfrom(BUFFER_SIZE)
+    except Exception as e:
+        print(f"DNS timeout or error: {e}")
+
+    sock.close()
+
+    if reply_bytes is None:
+        print("no reply from DNS server.")
+        return None
+
+    reply = json.loads(reply_bytes.decode('utf-8'))
+    print(f"DNS reply: {reply}")
+
+    if reply.get("status") == "SUCCESS":
+        server_ip = reply.get("ip")
+        print(f"resolved: {domain} -> {server_ip}")
+        return server_ip
+
+    print(f"DNS lookup failed. status: {reply.get('status')}")
+    return None
+
+
+# -------------------------------------------------------
+# Step 3: Connect to the app server and fetch the file.
+# -------------------------------------------------------
+def connect_to_app_server(server_ip):
+    print(f"\n--- step 3: app server ---")
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        print(f"connecting to {server_ip}:{APP_SERVER_PORT}...")
+        sock.connect((server_ip, APP_SERVER_PORT))
+        print("connected.")
+
         command = "FETCH http://127.0.0.1:8080/test_file.txt"
-        print(f"[Client] Sending command: '{command}'")
-        send_command(client_socket, command)
+        send_framed(sock, command)
 
-        # Receive the full response (HTML bytes, or an ERROR string) using framing
-        response_data = receive_all(client_socket)
+        print("waiting for response...")
+        response_bytes = receive_framed(sock)
+        print(f"response received: {len(response_bytes)} bytes")
 
-        # If the server returned an error, print it instead of saving garbage to disk
-        if response_data.startswith(b"ERROR"):
-            print(f"[Client] -> Server error: {response_data.decode('utf-8')}")
+        if response_bytes.startswith(b"ERROR"):
+            print(f"server error: {response_bytes.decode('utf-8')}")
         else:
-            # Save the downloaded HTML bytes to disk
-            output_filename = "downloaded_from_web.html"
-            with open(output_filename, 'wb') as f:
-                f.write(response_data)
-            print(f"[Client] -> Success! Saved '{output_filename}' ({len(response_data)} bytes)")
+            out_file = "downloaded_from_web.html"
+            with open(out_file, 'wb') as f:
+                f.write(response_bytes)
+            print(f"file saved: '{out_file}' ({len(response_bytes)} bytes)")
 
     except Exception as e:
-        print(f"[Client] Failed to communicate with app server: {e}")
-    finally:
-        client_socket.close()
+        print(f"connection error: {e}")
+
+    sock.close()
+    print("socket closed.")
+
 
 if __name__ == "__main__":
-    print("=== Starting Network Initialization ===")
+    print("=== starting network initialization ===")
 
-    # Step 1: DHCP
-    my_ip = request_ip_from_dhcp()
-
-    if my_ip:
-        # Step 2: DNS
-        app_server_ip = resolve_domain_with_dns(TARGET_DOMAIN)
-
-        if app_server_ip:
-            print("\n=== Network Initialization Complete ===")
-            print(f"My IP: {my_ip}")
-            print(f"Target App Server IP: {app_server_ip}")
-
-            # Step 3: Connect to the HTTP proxy server and fetch a URL
-            connect_to_app_server(app_server_ip)
+    assigned_ip = request_ip_from_dhcp()
+    if assigned_ip is None:
+        print("DHCP failed. exiting.")
+    else:
+        server_ip = resolve_domain_with_dns(TARGET_DOMAIN)
+        if server_ip is None:
+            print("DNS failed. exiting.")
+        else:
+            print(f"\ninitialization complete. my IP: {assigned_ip}, server: {server_ip}")
+            connect_to_app_server(server_ip)
